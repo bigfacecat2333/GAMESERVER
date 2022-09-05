@@ -6,17 +6,52 @@
 #include <memory>
 #include <list>
 #include <fstream>
+#include <sstream>
 #include <vector>
 
 namespace gameserver{
 
 class Logger;
+
+class LogLevel {
+public:
+    /**
+     * @brief 日志级别枚举
+     */
+    enum Level {
+        /// 未知级别
+        UNKNOW = 0,
+        /// DEBUG 级别
+        DEBUG = 1,
+        /// INFO 级别
+        INFO = 2,
+        /// WARN 级别
+        WARN = 3,
+        /// ERROR 级别
+        ERROR = 4,
+        /// FATAL 级别
+        FATAL = 5
+    };
+
+    /**
+     * @brief 将日志级别转成文本输出
+     * @param[in] level 日志级别
+     */
+    static const char* ToString(LogLevel::Level level);
+    
+    /**
+     * @brief 将文本转换成日志级别
+     * @param[in] str 日志级别文本
+     */
+    static LogLevel::Level FromString(const std::string& str);
+};
+
 //日志事件，存放字段属性
 class LogEvent{
 public:
     typedef std::shared_ptr<LogEvent> ptr;  // smart pointer enable copy
-    
-    LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level
+    // std::shared_ptr<Logger> logger, LogLevel::Level level
+    LogEvent(std::shared_ptr<Logger> logger
             ,const char* file, int32_t line, uint32_t elapse
             ,uint32_t thread_id, uint32_t fiber_id, uint64_t time
             ,const std::string& thread_name);
@@ -58,62 +93,6 @@ private:
     LogLevel::Level m_level;
 };
 
-class LogLevel {
-public:
-    /**
-     * @brief 日志级别枚举
-     */
-    enum Level {
-        /// 未知级别
-        UNKNOW = 0,
-        /// DEBUG 级别
-        DEBUG = 1,
-        /// INFO 级别
-        INFO = 2,
-        /// WARN 级别
-        WARN = 3,
-        /// ERROR 级别
-        ERROR = 4,
-        /// FATAL 级别
-        FATAL = 5
-    };
-
-    /**
-     * @brief 将日志级别转成文本输出
-     * @param[in] level 日志级别
-     */
-    static const char* ToString(LogLevel::Level level);
-    
-    /**
-     * @brief 将文本转换成日志级别
-     * @param[in] str 日志级别文本
-     */
-    static LogLevel::Level FromString(const std::string& str);
-};
-
-// 输出处理
-class LogHandler{
-public:
-    typedef std::shared_ptr<LogHandler> ptr;
-    virtual ~LogHandler () {}  // destructer
-
-    virtual void log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) = 0;
-
-    void setFormatter(LogFormatter::ptr val) {m_formatter = val;}
-    LogFormatter::ptr getFormatter();
-
-    virtual std::string toYamlString() = 0;
-protected:
-    /// 日志级别
-    LogLevel::Level m_level = LogLevel::DEBUG;
-    /// 是否有自己的日志格式器
-    bool m_hasFormatter = false;
-    /// Mutex
-    MutexType m_mutex;
-    /// 日志格式器
-    LogFormatter::ptr m_formatter;
-};
-
 //输出格式
 class LogFormatter{
 public:
@@ -139,18 +118,10 @@ public:
      */
     LogFormatter(const std::string& pattern);
 
-    /**
-     * @brief 返回格式化日志文本
-     * @param[in] logger 日志器
-     * @param[in] level 日志级别
-     * @param[in] event 日志事件
-     */
     std::string format(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event);
     std::ostream& format(std::ostream& ofs, std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event);
 public:
-    /**
-     * @brief 日志内容项格式化
-     */
+    //日志内容项格式化
     class FormatItem {
     public: 
         /**
@@ -174,13 +145,37 @@ private:
     bool m_error = false;
 
 };
+
+// 输出处理
+class LogHandler{
+friend class Logger;
+public:
+    typedef std::shared_ptr<LogHandler> ptr;
+    virtual ~LogHandler () {}  // destructer
+
+    virtual void log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) = 0;
+
+    void setFormatter(LogFormatter::ptr val) {m_formatter = val;}
+    LogFormatter::ptr getFormatter();
+
+protected:
+    /// 日志级别
+    LogLevel::Level m_level = LogLevel::DEBUG;
+    /// 是否有自己的日志格式器
+    bool m_hasFormatter = false;
+    /// Mutex
+
+    /// 日志格式器
+    LogFormatter::ptr m_formatter;
+};
+
 //日志类
-class Logger{
+class Logger : public std::enable_shared_from_this<Logger>{  //可以使用shared_from_this成员函数获取自身的shared_ptr指针
 public:
     typedef std::shared_ptr<Logger> ptr;
-    typedef Spinlock MutexType;
+
     // 在cpp文件里完成
-    Logger (const std::string name = "root");
+    Logger (const std::string& name = "root");
 
     void log(LogLevel::Level level, LogEvent::ptr event);
     void debug(LogEvent::ptr event);
@@ -200,14 +195,14 @@ public:
     void setFormatter(const std::string& val);
     LogFormatter::ptr getFormatter();
 
-    std::string toYamlString();
+
 private:
     /// 日志名称
     std::string m_name;
     /// 日志级别
     LogLevel::Level m_level;
     /// Mutex
-    MutexType m_mutex;
+
     /// 日志目标集合
     std::list<LogHandler::ptr> m_handlers;
     /// 日志格式器
@@ -224,8 +219,8 @@ class StdoutLogHandler : public LogHandler{
 public:
     typedef std::shared_ptr<StdoutLogHandler> ptr;
     // 需要实现的函数
-    virtual void log(LogLevel::Level level, LogEvent::ptr event) override;
-    virtual std::string toYamlString() override;
+    virtual void log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override;
+
 private:
 
 };
@@ -233,12 +228,12 @@ private:
 /**
  * @brief 输出到文件的Handler
  */
-class FlieLogHandler : public LogHandler{
+class FileLogHandler : public LogHandler{
 public:
-    typedef std::shared_ptr<FlieLogHandler> ptr;
-    FlieLogHandler(const std::string& filename);
-    virtual void log(LogLevel::Level level, LogEvent::ptr event) override;
-    virtual std::string toYamlString() override;
+    typedef std::shared_ptr<FileLogHandler> ptr;
+    FileLogHandler(const std::string& filename);
+    virtual void log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override;
+
 
     /**
      * @brief 重新打开日志文件

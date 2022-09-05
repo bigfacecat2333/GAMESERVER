@@ -1,4 +1,5 @@
 #include "log.h"
+#include <iostream>
 #include <map>
 #include <functional>
 #include <time.h>
@@ -20,6 +21,11 @@ const char* LogLevel::ToString(LogLevel::Level level){
         return "UNKNOW";
     }
     return "UNKNOW";
+}
+
+LogFormatter::ptr LogHandler::getFormatter() {
+    // MutexType
+    return m_formatter;
 }
 
 class MessageFormatItem : public LogFormatter::FormatItem {
@@ -146,12 +152,40 @@ private:
     std::string m_string;
 };
 
+LogEvent::LogEvent(std::shared_ptr<Logger> logger
+            ,const char* file, int32_t line, uint32_t elapse
+            ,uint32_t thread_id, uint32_t fiber_id, uint64_t time
+            ,const std::string& thread_name)
+    :m_file(file)
+    ,m_line(line)
+    ,m_elapse(elapse)
+    ,m_threadId(thread_id)
+    ,m_fiberId(fiber_id)
+    ,m_time(time)
+    ,m_threadName(thread_name)
+    ,m_logger(logger){}
+    // ,m_level(level) {}
+
+
 // Logger
 Logger::Logger (const std::string& name)
-    :m_name(name) {
+    :m_name(name) 
+    ,m_level(LogLevel::DEBUG) {
+    // shared_ptr.reset()包含两个操作。当智能指针中有值的时候，调用reset()会使引用计数减1.当调用reset（new xxx())重新赋值时，智能指针首先是生成新对象，然后将就对象的引用计数减1（当然，如果发现引用计数为0时，则析构旧对象），然后将新对象的指针交给智能指针保管。
+    m_formatter.reset(new LogFormatter("%d{%Y-%m-%d %H:%M:%S}%T%t%T%N%T%F%T[%p]%T[%c]%T%f:%l%T%m%n"));
+}
+
+LogFormatter::ptr Logger::getFormatter() {
+    //Mutex
+    return m_formatter;
 }
 
 void Logger::addHandler(LogHandler::ptr handler){
+    //MutexType::Lock lock(m_mutex);
+    if(!handler->getFormatter()) {
+        //MutexType::Lock ll(handler->m_mutex);
+        handler->m_formatter = m_formatter;  // 通过友元申明，调用的是Logger类里的m_formatter
+    }
     m_handlers.push_back(handler);
 }
 
@@ -166,9 +200,15 @@ void Logger::delHandler(LogHandler::ptr handler){
 
 void Logger::log(LogLevel::Level level, LogEvent::ptr event){
     if(level >= m_level) {
-        for(auto& i : m_handlers) {
-            i->log(self, level, event);  // handler 的 log函数
-        }       
+        auto self = shared_from_this();
+        //MutexType::Lock lock(m_mutex);
+        if(!m_handlers.empty()) {
+            for(auto& i : m_handlers) {
+                i->log(self, level, event);
+            }
+        } else if(m_root) {
+            m_root->log(level, event);
+        }
     }
 }
 
@@ -193,17 +233,18 @@ void Logger::fatal(LogEvent::ptr event){
 }
 
 // Handler
-FlieLogHandler::FlieLogHandler(const std::string& filename)
+FileLogHandler::FileLogHandler(const std::string& filename)
     :m_filename(filename){
+    reopen();
 }
 
-void FlieLogHandler::log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) {
+void FileLogHandler::log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) {
     if(level >= m_level) {
-        m_filestream << m_formatter.format(logger, level, event);
+        m_filestream << m_formatter->format(logger, level, event);
     }
 }
 
-bool FlieLogHandler::reopen() {
+bool FileLogHandler::reopen() {
     if(m_filestream){
         m_filestream.close();
     }
@@ -213,7 +254,7 @@ bool FlieLogHandler::reopen() {
 
 void StdoutLogHandler::log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) {
     if(level >= m_level) {
-        MutexType::Lock lock(m_mutex);
+
         m_formatter->format(std::cout, logger, level, event);
     }
 }
@@ -227,7 +268,7 @@ LogFormatter::LogFormatter(const std::string& pattern)
 std::string LogFormatter::format(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event){
     std::stringstream ss;
     for(auto& i : m_items){
-        i->format(ss, logger,level, event)
+        i->format(ss, logger,level, event);
     }
     return ss.str();
 }
@@ -245,14 +286,15 @@ std::ostream& LogFormatter::format(std::ostream& ofs, std::shared_ptr<Logger> lo
 void LogFormatter::init() {
     //str, format, type
     std::vector<std::tuple<std::string, std::string, int>> vec;
-    std::string nstr;
+    std::string nstr;  // normal string
     for(size_t i = 0; i < m_pattern.size(); ++i) {
         if(m_pattern[i] != '%') {
             nstr.append(1, m_pattern[i]);  // 1表示添加1个字符长度
-            continue;
+            continue; // 正常情况
         }
 
         if((i + 1) < m_pattern.size()) {
+            // %%的情况，只输出一个%
             if(m_pattern[i + 1] == '%') {
                 nstr.append(1, '%');
                 continue;
@@ -266,7 +308,7 @@ void LogFormatter::init() {
         std::string str;
         std::string fmt;
         while(n < m_pattern.size()) {
-            // 特殊情况：不是字符
+            // 特殊情况：%后跟的不是字符
             if(!fmt_status && (!isalpha(m_pattern[n]) && m_pattern[n] != '{'
                     && m_pattern[n] != '}')) {  // alpha就是字母
                 str = m_pattern.substr(i + 1, n - i - 1);
@@ -275,10 +317,10 @@ void LogFormatter::init() {
             // 找到{ ，设flag为1, 并标记此位置
             if(fmt_status == 0) {
                 if(m_pattern[n] == '{') {
-                    str = m_pattern.substr(i + 1, n - i - 1);
+                    str = m_pattern.substr(i + 1, n - i - 1); // str是%后的字符串
                     //std::cout << "*" << str << std::endl;
                     fmt_status = 1; //解析格式
-                    fmt_begin = n;
+                    fmt_begin = n; //解析起始位置
                     ++n;
                     continue;
                 }
@@ -301,14 +343,14 @@ void LogFormatter::init() {
             }
         }
         // 扫描%后内容的后处理，fmt有内容就是有{}的情况
-        if(fmt_status == 0) {  // 正确，添加到nstr中
+        if(fmt_status == 0) {  // 正确，nstr添加到vec中，type为1
             // 之前有内容，先处理nstr，并且需要清空
             if(!nstr.empty()) {
-                //str, format, type
+                //str, format, type = 0/1(1表示需要解析)
                 vec.push_back(std::make_tuple(nstr, std::string(), 0));
                 nstr.clear();
             }
-            // str是%后到{之前的内容， fmt是{}里的内容，fmt也可能没有
+            // str是%后到{之前的内容， fmt是{}里的内容，fmt也可能没有，1是type
             vec.push_back(std::make_tuple(str, fmt, 1));
             i = n - 1;
         } else if(fmt_status == 1) {
@@ -322,7 +364,7 @@ void LogFormatter::init() {
         vec.push_back(std::make_tuple(nstr, "", 0));
     }
     
-    //%m,%p,%r ....
+    //%m,%p,%r .... map<str, function<FormatItem>>
     static std::map<std::string, std::function<FormatItem::ptr(const std::string& str)> > s_format_items = {
 #define XX(str, C) {#str, [](const std::string& fmt) {return FormatItem::ptr(new C(fmt));}}
         // FormatItem子类
@@ -345,18 +387,18 @@ void LogFormatter::init() {
         if(std::get<2>(i) == 0) {
             m_items.push_back(FormatItem::ptr(new StringFormatItem(std::get<0>(i))));
         } else {
-            auto it = s_format_items.find(std::get<0>(i));
+            auto it = s_format_items.find(std::get<0>(i)); // 按值查询
             if(it == s_format_items.end()) {
                 m_items.push_back(FormatItem::ptr(new StringFormatItem("<<error_format %" + std::get<0>(i) + ">>")));
                 m_error = true;
             } else {
-                m_items.push_back(it->second(std::get<1>(i)));
+                m_items.push_back(it->second(std::get<1>(i))); // it有first和second
             }
         }
 
-        std::cout << "(" << std::get<0>(i) << ") - (" << std::get<1>(i) << ") - (" << std::get<2>(i) << ")" << std::endl;
+        // std::cout << "(" << std::get<0>(i) << ") - (" << std::get<1>(i) << ") - (" << std::get<2>(i) << ")" << std::endl;
     }
-    std::cout << m_items.size() << std::endl;
+    // std::cout << m_items.size() << std::endl;
 }
 
 
